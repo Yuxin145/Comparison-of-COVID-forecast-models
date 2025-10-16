@@ -1,5 +1,7 @@
 run_prediction_us <- function() {
   
+  library(cmdstanr)
+  
   # settings
   args <- commandArgs(trailingOnly = TRUE)
   states <- unlist(stringr::str_split(args[1], "8"))
@@ -11,6 +13,8 @@ run_prediction_us <- function() {
   # models
   source("models/gp.r")
   rhos <- c(1,7,14)
+  
+  gp_mod <- cmdstan_model("models/gp.stan", cpp_options = list(stan_threads = T))
   
   # states
   if (grepl("all", states)) {
@@ -40,7 +44,7 @@ run_prediction_us <- function() {
       else {
         for (r in rhos) {
           test_df_state$data[[k]][[paste0("gp-",r)]] <- get_samples(
-            train_and_predict.gp(rho_short = r, data = train_df_state$data[[k]], 
+            train_and_predict.gp(rho_short = r, gp_model = gp_mod, data = train_df_state$data[[k]], 
                                  seed = seed12345, n = n_preds, d = n_draws),
             test_df_state$data[[k]]
           )

@@ -11,7 +11,7 @@ library(posterior)
 #'            
 #' @return A d x n matrix fcast of the posterior draws for the incidence
 
-train_and_predict.gp <- function(rho_short, ...) {
+train_and_predict.gp <- function(rho_short, gp_model, ...) {
   
   # arguments 
   args <- c(as.list(environment()), list(...))
@@ -28,8 +28,8 @@ train_and_predict.gp <- function(rho_short, ...) {
                     rho_short = rho_short)
   
   # fit model
-  gp_mod <- cmdstan_model("models/gp.stan", cpp_options = list(stan_threads = T))
-  fit <- gp_mod$sample(
+  #gp_mod <- cmdstan_model("models/gp.stan", cpp_options = list(stan_threads = T))
+  fit <- gp_model$sample(
     data =  data_list,
     iter_sampling = args$d / 2,
     parallel_chains = 4, 

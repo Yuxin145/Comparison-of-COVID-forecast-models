@@ -1,32 +1,32 @@
 functions {
   
-  matrix gp_exp_periodic_cov1(real[] x, real alpha, real rho_p, real period, real rho_e) {
+  matrix gp_exp_periodic_cov1(array[] real x, real alpha, real rho_p, real period, real rho_e) {
     int N = num_elements(x);
     matrix[N, N] K;
     for (i in 1:N) {
       K[i,i] = alpha^2;
       for (j in (i + 1):N) {
-        K[i,j] = (alpha ^ 2) * exp(-2*(sin(pi() * fabs(x[i] - x[j]) / period) ^ 2) / (rho_p ^ 2)) * exp(- ((x[i]-x[j]) ^ 2) / (2 * rho_e ^ 2));
+        K[i,j] = (alpha ^ 2) * exp(-2*(sin(pi() * abs(x[i] - x[j]) / period) ^ 2) / (rho_p ^ 2)) * exp(- ((x[i]-x[j]) ^ 2) / (2 * rho_e ^ 2));
         K[j,i] = K[i,j];
       }
     }
     return K;
   }
   
-  matrix gp_exp_periodic_cov2(real[] x1, real[] x2, real alpha, real rho_p, real period, real rho_e) {
+  matrix gp_exp_periodic_cov2(array[] real x1, array[] real x2, real alpha, real rho_p, real period, real rho_e) {
     int N1 = num_elements(x1);
     int N2 = num_elements(x2);
     matrix[N1, N2] K;
     for (i in 1:N1) {
       for (j in 1:N2) {
-        K[i,j] = (alpha ^ 2) * exp(-2*(sin(pi() * fabs(x1[i] - x2[j]) / period) ^ 2) / (rho_p ^ 2)) * exp(- ((x1[i]-x2[j]) ^ 2) / (2 * rho_e ^ 2));
+        K[i,j] = (alpha ^ 2) * exp(-2*(sin(pi() * abs(x1[i] - x2[j]) / period) ^ 2) / (rho_p ^ 2)) * exp(- ((x1[i]-x2[j]) ^ 2) / (2 * rho_e ^ 2));
       }
     }
     return K;
   }
   
-  vector gp_pred_rng(real[] x2,
-                              vector y, real[] x1,
+  vector gp_pred_rng(array[] real x2,
+                              vector y, array[] real x1,
                               real alpha0, real rho0,
                               real alpha1, real rho1,
                               real alpha2, real rho2p, real period, real rho2e,
@@ -62,9 +62,9 @@ functions {
 data {
   int<lower=1> N1;
   int<lower=1> N2;
-  real x1[N1];
+  array[N1] real x1;
   vector[N1] y1;
-  real x2[N2];
+  array[N2] real x2;
   real<lower=0> rho_short;
 }
 

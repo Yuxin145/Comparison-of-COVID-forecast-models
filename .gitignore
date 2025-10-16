@@ -4,7 +4,8 @@ results/
 *.nb
 *.pdf
 /**/_old
-
+experiments/**/*.rds
+README.md
 
 # R
 # History files
