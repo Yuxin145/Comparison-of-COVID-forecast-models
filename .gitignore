@@ -3,6 +3,8 @@ predictions/**/*.rds
 results/
 *.nb
 *.pdf
+*.docx
+*.doc
 /**/_old
 experiments/**/*.rds
 README.md
