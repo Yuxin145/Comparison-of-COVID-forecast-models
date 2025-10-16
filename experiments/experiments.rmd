@@ -1,0 +1,257 @@
+---
+title: "Experiments"
+author: "Nicolas Banholzer"
+date: '2022-04-21'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+# libraries
+library(tidyverse)
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+library(reshape2)
+library(lubridate)
+
+# utils
+source("../utils/eval.r")
+
+# helper
+source("../helper/plotting.r")
+
+# settings
+source("../settings/naming.r")
+
+# compute scores (CRPS)
+score_experiment <- function(files, parameter, model) {
+  scores_df <- tibble()
+  for (f in 1:length(files)) {
+    df <- readRDS(files[f])
+    for (p in parameter) {
+      df_p <- df %>% mutate(data = map(data, function(D) 
+        D %>% 
+          dplyr::select(all_of(c("date", "cases", "incidence", paste0(model, "-", p)))) %>%
+          set_names(c("date", "cases", "incidence", "forecast")))
+        )
+      crps <- compute_forecast_score(df = df_p, model = model) %>%
+        mutate(variable = p)
+      scores_df <- rbind(scores_df, crps)
+    }
+  }
+  return(scores_df)
+}
+
+# summarize (mean) scores 
+summarize_scores <- function(scores_df) {
+  scores_df <- scores_df %>%
+    group_by(model, variable, n) %>%
+    summarize(score = mean(score)) %>%
+    ungroup()
+  return(scores_df)
+}
+
+# plot function
+plot_experiment <- function(score_df, col_blues, expr, title) {
+  n_cols <- length(unique(score_df$variable))
+  cols <- brewer.pal(9, "Blues")[col_blues]
+    
+  score_df %>%
+    mutate(n = ordered(paste0(n, "-week ahead forecast"), levels = c("1-week ahead forecast", "2-week ahead forecast"))) %>%
+    ggplot(aes(x = n, y = score, color = factor(variable), group = variable)) +
+    geom_line() +
+    geom_point(shape = 1) +
+    #scale_y_continuous(limits = c(0,1)) +
+    scale_color_manual(values = cols) +
+    labs(y = "Average CRPS", color = expr, title = title) +
+    theme_bw2() +
+    theme(axis.title.x = element_blank(), legend.position = "top") 
+}
+
+boxplot_experiment <- function(score_df, col_blues, expr, title) {
+  n_cols <- length(unique(score_df$variable))
+  cols <- brewer.pal(9, "Blues")[col_blues]
+    
+  score_df %>%
+    mutate(n = factor(paste0(n, "-week ahead forecast"), levels = c("1-week ahead forecast", "2-week ahead forecast"))) %>%
+    ggplot(aes(x = n, y = score, color = factor(variable))) +
+    geom_boxplot() +
+    scale_color_manual(values = cols) +
+    scale_y_sqrt() +
+    labs(y = "CRPS (sqrt scale)", color = expr, title = title) +
+    theme_bw2() +
+    theme(axis.title.x = element_blank(), legend.position = "top") 
+}
+```
+
+## Mechanistic models
+
+### EpiEstim
+
+```{r}
+# data
+files_epiestim <- list.files("epiestim/", full.names = T)
+tau = c(1,7,14)
+
+# compute scores
+scores_epiestim <- score_experiment(files_epiestim, tau, "epiestim")
+epiestim_pl <- boxplot_experiment(scores_epiestim, c(4,6,8), expression(tau), "")
+epiestim_pl
+
+# summarize scores
+scores_epiestim_sum <- summarize_scores(scores_epiestim) 
+epiestim_sum_pl <- plot_experiment(scores_epiestim_sum, c(4,6,8), expression(tau), "")
+epiestim_sum_pl  
+```
+
+
+### EpiNow2
+
+```{r}
+# data
+files_epinow <- list.files("epinow2/", full.names = T)
+epimodel = c('rw','backcalc','gp')
+epimodel_names <- c("Random walk", "Backcalculation", "GP")
+names(epimodel_names) <- epimodel
+
+# compute scores
+scores_epinow <- score_experiment(files_epinow, epimodel, "epinow2")
+epinow_pl <- boxplot_experiment(scores_epinow %>% mutate(variable = recode(variable, !!! epimodel_names)), 
+                                c(4,6,8), expression(R[t]*" model"), "")
+epinow_pl
+
+# summarize scores
+scores_epinow_sum <- summarize_scores(scores_epinow) 
+epinow_sum_pl <- plot_experiment(scores_epinow_sum %>% mutate(variable = recode(variable, !!! epimodel_names)), c(4,6,8), 
+                                 expression(R[t]*" model"), "")
+epinow_sum_pl
+```
+
+## Stat TS models
+
+### ARIMA
+
+```{r}
+#ARIMA
+# data
+files_arima <- list.files("arima/", full.names = T)
+pdq_orders <- matrix(c(1,0,1,
+                       1,1,1,
+                       2,0,2,
+                       2,1,2,
+                       2,2,2),
+                     ncol = 3, byrow = T)
+pdq_name <- apply(pdq_orders, 1, paste, collapse = "")
+
+# compute scores
+scores_arima <- score_experiment(files_arima, pdq_name, "arima")
+arima_pl <- boxplot_experiment(scores_arima, c(4,5,6,7,9), "", "") # expression("SARIMA(p,d,q)(0,1,0)"[7]*":")
+arima_pl
+
+# summarize scores
+scores_arima_sum <- summarize_scores(scores_arima) %>%
+  mutate(variable = map_chr(variable, function(x) paste0("(", paste0(unlist(strsplit(x, "*")), collapse = ","),  ")")))
+
+arima_sum_pl <- plot_experiment(scores_arima_sum, c(4,5,6,7,9), "", "")
+arima_sum_pl
+```
+
+
+### Prophet
+
+```{r}
+#Prophet
+# data
+files_prophet <- list.files("prophet/", full.names = T)
+cp_scale <- seq(0.05, 0.45, 0.1)
+
+# compute scores
+scores_prophet <- score_experiment(files_prophet, cp_scale, "prophet")
+prophet_pl <- boxplot_experiment(scores_prophet, c(2,4,6,8,9), expression(tau), "") 
+prophet_pl
+
+# summarize scores
+scores_prophet_sum <- summarize_scores(scores_prophet)
+prophet_sum_pl <- plot_experiment(scores_prophet_sum, c(2,4,6,8,9), expression(tau), "")
+prophet_sum_pl
+```
+
+
+### GP
+
+```{r}
+# GP
+# data
+files_gp <- list.files("gp/", full.names = T)
+rhos <- c(1,7,14)
+
+# compute scores
+scores_gp <- score_experiment(files_gp, rhos, "gp")
+gp_pl <- boxplot_experiment(scores_gp, c(2,4,6,8,9), expression(rho*" in short-term kernel"), "")
+gp_pl
+
+# summarize scores
+scores_gp_sum <- summarize_scores(scores_gp)
+gp_sum_pl <- plot_experiment(scores_gp_sum, c(2,4,6,8,9), expression(rho*" in short-term kernel"), "")
+gp_sum_pl
+```
+
+
+## Best models
+
+```{r}
+all_plots <- arrangeGrob(epiestim_sum_pl + labs(title = "a   EpiEstim\n") 
+                         + theme(plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"), plot.title.position = "plot", legend.position = c(-.125,1.05),
+                                 legend.justification = "left", legend.direction = "horizontal", 
+                                 legend.box = "horizontal", legend.margin = margin(0), legend.key = element_blank(),
+                                 legend.box.margin=margin(b = 10)), 
+                         epiestim_pl + theme(legend.position = "none", title = element_blank()),
+                         epinow_sum_pl + labs(title = "b   EpiNow2\n") + 
+                           theme(plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"), plot.title.position = "plot", legend.position = c(-.125,1.05),
+                                 legend.justification = "left", legend.direction = "horizontal", 
+                                 legend.box = "horizontal", legend.margin = margin(0), legend.key = element_blank(),
+                                 legend.box.margin=margin(b = 10)),
+                         epinow_pl + theme(legend.position = "none", title = element_blank()),
+                         arima_sum_pl + labs(title = "c   SARIMA\n") + 
+                           theme(plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"), plot.title.position = "plot", legend.position = c(-.125,1.05),
+                                 legend.justification = "left", legend.direction = "horizontal", legend.title = element_blank(),
+                                 legend.box = "horizontal", legend.margin = margin(0), legend.key = element_blank(),
+                                 legend.box.margin=margin(b = 10)), 
+                         arima_pl + theme(legend.position = "none", title = element_blank()), 
+                         prophet_sum_pl + labs(title = "d   Prophet\n") + 
+                           theme(plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"), plot.title.position = "plot", legend.position = c(-.125,1.05),
+                                 legend.justification = "left", legend.direction = "horizontal", 
+                                 legend.box = "horizontal", legend.margin = margin(0), legend.key = element_blank(),
+                                 legend.box.margin=margin(b = 10)), 
+                         prophet_pl + theme(legend.position = "none", title = element_blank()), 
+                        gp_sum_pl + labs(title = "e   GP\n") + 
+                          theme(plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"), plot.title.position = "plot", legend.position = c(-.125,1.05),
+                                 legend.justification = "left", legend.direction = "horizontal", 
+                                 legend.box = "horizontal", legend.margin = margin(0), legend.key = element_blank(),
+                                 legend.box.margin=margin(b = 10)), 
+                        gp_pl + theme(legend.position = "none", title = element_blank()),
+                         ncol = 2, widths = c(8.25, 7.75))
+ggsave("../results/experiments.pdf", all_plots, width = 16 / cm(1), height = 21 / cm(1))
+```
+
+```{r}
+for (f in c(files_epiestim, files_epinow, files_arima, files_prophet, files_gp)) {
+  model <- gsub(".rds", "", dirname(f))
+  p <- ifelse(model == "epiestim", "7",
+              ifelse(model == "epinow2", "gp",
+                     ifelse(model == "arima", "101",
+                            ifelse(model == "prophet", "0.45", "7"))))
+  df <- readRDS(f) %>% 
+    mutate(data = map(data, function(D) 
+      D %>% 
+        dplyr::select(all_of(c("date", "cases", "incidence", paste0(model, "-", p)))) %>%
+        set_names(c("date", "cases", "incidence", "forecast")))
+      )
+  saveRDS(df, paste0("../predictions/", dirname(f), "/", basename(f)))
+}
+```
