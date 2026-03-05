@@ -1,0 +1,104 @@
+---
+title: "data convertion"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(dplyr.summarise.inform = FALSE)
+```
+
+```{r}
+# libraries
+library(tidyverse)
+library(reshape2)
+library(lubridate)
+
+# settings
+source("settings/naming.r")
+
+Sys.setlocale("LC_TIME", "English_United States.1252")
+```
+
+## npy - rds convertion
+```{r}
+# load library and setup for convertion
+library(reticulate)
+#reticulate::install_miniconda()
+reticulate::use_miniconda("r-reticulate", required = TRUE)
+np <- import("numpy")
+```
+
+```{r}
+# load skeleton and your file
+mod_dir <- "D:/Users/peter/Desktop/UROPS/Foundation models/data/predictions/"
+
+mod_name <- "chronos2"
+
+for (state in states){
+  skeleton <- readRDS(paste0("predictions/arima/", toupper(state), ".rds"))
+  
+  pred_arr <- np$load(paste0(mod_dir, mod_name,"/", state, "_forecasts.npy"))
+  print(dim(pred_arr))
+  
+  make_inner <- function(i) {
+    base <- skeleton$data[[i]][, c("date", "cases", "incidence")]
+    base$forecast <- lapply(seq_len(nrow(base)), function(j) as.numeric(pred_arr[i, j, ]))
+    base}
+  
+  df_from_npy <- tibble(
+    state         = skeleton$state,
+    forecast_date = skeleton$forecast_date,
+    data          = lapply(seq_len(nrow(skeleton)), make_inner))
+  
+  saveRDS(df_from_npy, paste0("predictions/", mod_name, "/", toupper(state),".rds"))
+}
+```
+
+## rds - npy convertion
+```{r}
+models <- "prophet"
+states <- "ny"
+
+for (model in models){
+  for (state in states){
+    
+    file_path <- paste0("predictions/", model, "/", toupper(state), ".rds")
+    if (!file.exists(file_path)) {
+      next
+    }
+    
+    state_model <-readRDS(file_path)
+    
+    win_n  <- nrow(state_model)
+    day_n  <- nrow(state_model$data[[1]])
+    draw_n <- length(state_model$data[[1]]$forecast[[1]])
+    
+    # Pre-allocate
+    arr <- array(NA_real_, dim = c(win_n, day_n, draw_n))
+    dates_mat <- matrix(as.Date(NA), nrow = win_n, ncol = day_n)
+    start_dates <- as.Date(state_model$forecast_date)
+    
+    for (w in seq_len(win_n)) {
+      dfw <- state_model$data[[w]]
+      dates_mat[w, ] <- as.Date(dfw$date)
+      for (d in seq_len(day_n)) {
+        # Ensure numeric (in case stored as character)
+        arr[w, d, ] <- as.numeric(dfw$forecast[[d]])
+      }
+    }
+    
+    np$save(paste0("D:/Users/peter/Desktop/UROPS/Foundation models/data/predictions/",model,"/",state,"_forecasts.npy"), arr)
+    
+    # Save compact metadata (dates as days since epoch for easy Python load)
+    start_days <- as.integer(start_dates) 
+    date_days  <- matrix(as.integer(dates_mat), nrow = win_n, ncol = day_n)
+    
+    np$savez(paste0("D:/Users/peter/Desktop/UROPS/Foundation models/data/predictions/",model,"/",state,"_meta.npz"),
+             start_dates = start_days,
+             dates = date_days,
+             state = state,
+             model = model)   # change per file as needed
+  }
+}
+```

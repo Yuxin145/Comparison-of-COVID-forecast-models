@@ -1,0 +1,68 @@
+# =========================
+# 1. Data & Output Files
+# =========================
+# Ignore raw data, processed data, and prediction arrays
+*.csv
+*.xls
+*.xlsx
+*.npy
+*.rds
+*.RData
+.RDataTmp*
+
+# Ignore specific output directories to prevent bloat
+baseline_r/predictions/
+foundation_python/data/3_incidence predictions/
+foundation_python/data/4_peak time predictions/
+foundation_python/data/5_test data/
+results/
+experiments/**/*.rds
+foundation_python/models/DeepAR/data/
+
+# Ignore large documents/notebook exports
+*.nb
+*.docx
+*.doc
+*.html
+
+# =========================
+# 2. Python & Jupyter
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.pytest_cache/
+
+# =========================
+# 3. R & RStudio
+# =========================
+# History files
+.Rhistory
+.Rapp.history
+
+# User-specific files
+.Ruserdata
+.Rproj.user/
+.Renviron
+
+# Example code in package build process
+*-Ex.R
+
+# Output files from R CMD build / check
+/*.tar.gz
+/*.Rcheck/
+
+# knitr and R markdown default cache directories
+*_cache/
+/cache/
+*.utf8.md
+*.knit.md
+
+# =========================
+# 4. OS / System Files
+# =========================
+.DS_Store
+Thumbs.db
+/**/_old
+.httr-oauth

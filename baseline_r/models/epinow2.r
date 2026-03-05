@@ -1,0 +1,80 @@
+# libraries
+library(EpiNow2)
+
+# utilities
+source("utils/delays.r")
+source("utils/prior_R.R")
+options(mc.cores = 4) 
+
+#' @title train and predict using EpiNow2
+#' 
+#' @param ... args$data: data.frame with columns date, cases, incidence; 
+#'            args$seed: seed
+#'            args$n: the number of days to forecast ahead
+#'            args$d: the number of posterior draws
+#'            
+#' @return A d x n matrix fcast of the posterior draws for the incidence
+
+
+train_and_predict.epinow2 <- function(est_rt, ...) {
+  
+  # arguments 
+  args <- c(as.list(environment()), list(...))
+  
+  # rename and select columns
+  # filter very low incidence
+  #' i.e. cumulative cases >= 10 or cumulative incidence >=1
+  #' EpiNow2 may otherwise not initialize as leading zeros cannot effectively be removed
+  data <- data.frame(date = args$data$date,
+                     confirm = args$data$cases,
+                     incidence = args$data$incidence) %>%
+    mutate(cum_cases = cumsum(confirm),
+           cum_incidence = cumsum(incidence)) %>%
+    dplyr::filter(cum_cases >= 10 | cum_incidence >= 1) %>%
+    dplyr::select(date, confirm)
+  
+  # parameters
+  if (est_rt == "backcalc" ) {
+    rto <- NULL
+    gpo <- NULL
+  } else if (est_rt == "rw") {
+    rto <- rt_opts(prior = rt_prior_dist, 
+                   use_breakpoints = F, pop = args$pop)
+    gpo <- NULL
+  } else if (est_rt == "gp") {
+    rto <- rt_opts(prior = rt_prior_dist, 
+                   use_breakpoints = F, pop = args$pop)
+    gpo <- gp_opts(basis_prop = .2, alpha = Normal(mean = 0, sd = .1))
+  } else {
+    stop("Invalid est_rt options")
+  }
+  
+  # fit model
+  estimates <- epinow(data,
+                      generation_time = gt_opts(dist = generation_time),
+                      delays = delay_opts(incubation_period + reporting_delay), #?
+                      backcalc = backcalc_opts(prior_window = 7),
+                      rt = rto,
+                      gp = gpo,
+                      stan = stan_opts(samples = args$d, seed = args$seed),
+                      forecast = forecast_opts(horizon=args$n),
+                      output = "samples")
+  
+  # get samples
+  samples <- estimates$estimates$samples
+  
+  # filter
+  samples <- samples %>%
+    dplyr::filter(variable == "reported_cases") %>%
+    dplyr::filter(type == "forecast")
+  
+  # transform
+  fcast <- samples %>%
+    dplyr::select(sample, time, value) %>%
+    spread(time, value) %>%
+    dplyr::select(-sample) %>%
+    as.matrix() %>%
+    t()
+  
+  return(fcast)
+}

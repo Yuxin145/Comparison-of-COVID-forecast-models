@@ -1,0 +1,800 @@
+---
+title: "Evaluation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Libraries
+
+```{r}
+# libraries
+library(tidyverse)
+library(reshape2)
+library(lubridate)
+library(covidcast)
+library(RcppCNPy)
+
+# utils
+source("utils/eval.r")
+source("utils/delays.r")
+
+# helper
+source("helper/plotting.r")
+
+# settings
+source("settings/naming.r")
+
+Sys.setlocale("LC_TIME", "English_United States.1252")
+```
+
+## Data
+```{r}
+inci <- tibble()
+for (model in dir("predictions")) {
+  for (file in list.files(paste0("predictions/", model, "/"), full.names = T)) {
+    df <- readRDS(file)
+    inci <- rbind(inci, compute_incidence(df, model))
+  }
+}
+inci <- inci %>%
+  mutate(date = as.Date(paste0(date, "-1"), format = "%Y-%W-%u"))
+
+inci_nonq <- inci %>% dplyr::filter(!model %in% quantile_model_names)
+inci_q <- inci %>% dplyr::filter(model %in% quantile_model_names)
+```
+
+```{r}
+# phase labels
+phase_labs <- read_csv("data/us-selected-states_labeled-phases.csv") %>%
+  rename(start_date = date) %>%
+  group_by(state) %>%
+  arrange(start_date) %>%
+  mutate(end_date = dplyr::lead(as.character(start_date), 1)) %>%
+  ungroup() %>%
+  mutate(end_date = ifelse(is.na(end_date), "2021-03-15", end_date)) %>%
+  mutate(end_date = as.Date(end_date)) %>%
+  mutate(epidemic_phase = factor(epidemic_phase, levels = c(c("exponential growth", "subexponential growth", "plateau", 
+                                                              "subexponential decline", "exponential decline")))) %>%
+  mutate(date = map2(start_date, end_date, function(s,e) seq.Date(s, e, by = "day"))) %>%
+  unnest(cols = c("date"))
+
+# parameters
+# - model colors
+mcols <- RColorBrewer::brewer.pal(length(models), "Dark2")
+```
+
+
+## Plot forecasts
+
+### Example forecast
+
+```{r}
+plot_forecasts <- function(sid = "CA", n_week = 1, title = "a   1-week ahead forecast for California") {
+  inci %>%
+  dplyr::filter(state_id == sid,
+                n == n_week) %>%
+  mutate(forecast = ifelse(forecast >1500, 1500, forecast)) %>%
+  ggplot(aes(x = date)) +
+  stat_lineribbon(aes(y = forecast), point_interval = "mean_qi", .width = c(.95), 
+                  color = "red", size = 1 / cm(1)) +
+  geom_line(aes(y = incidence), color = "black") +
+  facet_wrap(~model, ncol = 1) +
+  scale_fill_brewer(palette = "Reds") +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(y = "Weekly incidence (new cases per 100,000 people)",
+       title = title) +
+  theme_bw2() +
+  theme(legend.position = "none", axis.title.x = element_blank())
+}
+
+for (sid in states) {
+  sid_1week_pl <- plot_forecasts(toupper(sid), n_week = 1, title = paste("a   1-week ahead forecast for", state_names[sid]))
+  sid_2week_pl <- plot_forecasts(toupper(sid), n_week = 2, title = paste("b   2-week ahead forecast for", state_names[sid]))
+  sid_week_pl <- arrangeGrob(sid_1week_pl, sid_2week_pl, ncol = 2, widths = c(8,8))
+  ggsave(paste0("results/example-forecast-", sid, ".pdf"), sid_week_pl, width = 16 / cm(1), height = 16 / cm(1))
+}
+```
+
+## Descriptive
+
+### Proba. calibration
+
+```{r}
+# read forecasts and compute score
+#pCalib <- inci %>%
+#  group_by(state_id, date, n, model) %>%
+#  summarize(pC = pred_score(forecast, incidence, type = "calibration")) %>%
+#  ungroup()
+
+# plot score
+#pCalib_pl <- pCalib %>%
+#  mutate(n = paste0(n, "-week ahead forecast")) %>%
+#  ggplot(aes(x = pC, color = model, fill = model)) +
+#  facet_wrap(~ n, ncol = 3) +
+#  geom_density(alpha = 0.1, adjust = 5) + 
+#  scale_y_continuous(expand = c(0,0)) +
+#  scale_x_continuous(expand = c(0,0), breaks = seq(0,1,.2)) +
+#  scale_color_manual(values = mcols) +
+#  scale_fill_manual(values = mcols) +
+#  labs(x = "Probability integral transform", 
+#       y = "Density") +
+#  theme_bw2() +
+#  theme(legend.title = element_blank(), legend.position = "top",
+#        panel.spacing = unit(1, "lines"),
+#        plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"))
+
+model_levels <- c("SARIMA", "Prophet", "GP", "DeepAR", "Chronos2")   # edit to match your labels
+
+mcols <- c(
+  SARIMA    = "#1f77b4",  # blue
+  GP       = "#ff7f0e",  # orange
+  Prophet  = "#2ca02c",  # green
+  Chronos2   = "#9467bd",  # purple
+  DeepAR = "#d62728"   # red
+)
+
+set.seed(123)
+
+pit_from_quantile_vector <- function(q_vec, y, alphas = alpha_levels, randomized = TRUE) {
+  q <- as.numeric(q_vec)
+  # drop NAs and keep alphas aligned
+  keep <- !is.na(q)
+  q <- q[keep]
+  alphas <- alphas[keep]
+
+  # if nothing usable, return NA
+  if (length(q) == 0L) {
+    print("nothing usable")
+    return(NA_real_)
+  }
+
+  o <- order(alphas)
+  alphas <- alphas[o]; q <- q[o]
+  q <- cummax(q)
+
+  if (!is.na(y) && y < q[1]) {
+    return(if (randomized) runif(1, 0, alphas[1]) else 0)
+  }
+  if (!is.na(y) && y > tail(q, 1)) {
+    return(if (randomized) runif(1, tail(alphas, 1), 1) else 1)
+  }
+
+  iu <- which(q >= y)[1]
+  if (is.na(iu)) return(NA_real_)  # safety
+
+  il <- max(1, iu - 1)
+  ql <- q[il]; qu <- q[iu]; al <- alphas[il]; au <- alphas[iu]
+
+  if (qu > ql) {
+    al + (au - al) * (y - ql) / (qu - ql)
+  } else {
+    if (randomized) runif(1, al, au) else (al + au) / 2
+  }
+}
+
+pCalib_all <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarise(
+    pC = if (first(model) %in% quantile_models) {
+      pit_from_quantile_vector(forecast, first(incidence))
+    } else {
+      pred_score(forecast, incidence, type = "calibration")
+    },
+    .groups = "drop"
+  )%>%
+  mutate(model = factor(model, levels = model_levels))  # <<< NEW
+
+pCalib_pl <- pCalib_all %>%
+  mutate(n = paste0(n, "-week ahead forecast")) %>%
+  ggplot(aes(x = pC, color = model, fill = model)) +
+  facet_wrap(~ n, ncol = 3) +
+  geom_density(alpha = 0.12, adjust = 5, linewidth = 0.7) +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0,1,.2), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_color_manual(values = mcols, drop = FALSE) +  # <<< NEW
+  scale_fill_manual(values = mcols, drop = FALSE) +   # <<< NEW
+  labs(x = "Probability integral transform", y = "Density") +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.position = "top",
+        panel.spacing = unit(1, "lines"),
+        plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "pt"))
+
+pCalib_pl
+```
+
+
+### Empirical coverage
+
+```{r}
+quantile_coverage <- function(qvec, y, q_level, alphas = alpha_levels){
+  y  <- y[1]                              # one observed value per group
+  qv <- as.numeric(qvec)                  # the 17 quantiles
+  a  <- as.numeric(alphas)
+
+  ok <- !is.na(qv)
+  qv <- qv[ok]; a <- a[ok]
+  if (length(qv) == 0L || is.na(y)) return(NA_real_)
+
+  il <- which.min(abs(a - q_level))
+  iu <- which.min(abs(a - (1 - q_level)))
+
+  ql <- qv[il]
+  qu <- qv[iu]
+
+  as.integer(!is.na(ql) && !is.na(qu) && y >= ql && y <= qu)
+}
+
+cov90 <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(
+    cov = if (first(model) %in% quantile_models){
+      quantile_coverage(forecast, incidence, q_level = 0.05)}
+          else{
+            out <- pred_score(forecast, incidence, type = "coverage", q = 0.05)
+            as.numeric(out[1])},
+    .groups = "drop"
+  ) %>%
+  group_by(n, model) %>%
+  summarize(cov = mean(cov, na.rm = TRUE), .groups = "drop") %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast")))
+
+cov90_pl <- cov90 %>%
+  ggplot(aes(x = factor(n), y = cov, color = model, group = model)) +
+  geom_line() +
+  geom_point(shape = 1) +
+  geom_hline(aes(yintercept = .9), linetype = "dashed") +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1), labels = function(x) x * 100) +
+  scale_color_manual(values = mcols) +
+  labs(y = "Coverage of 90%-PI (%)") +
+  theme_bw2() +
+  theme(legend.title = element_blank(), axis.title.x = element_blank())
+
+cov90_pl
+
+cov50 <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(
+    cov = if (first(model) %in% quantile_models) {
+            quantile_coverage(forecast, incidence, q_level = 0.25)
+          } else {
+            out <- pred_score(forecast, incidence, type = "coverage", q = 0.25)
+            as.numeric(out[1])},
+  ) %>%
+  group_by(n, model) %>%
+  summarize(cov = mean(cov, na.rm = TRUE), .groups = "drop") %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast")))
+
+cov50_pl <- cov50 %>%
+  ggplot(aes(x = factor(n), y = cov, color = model, group = model)) +
+  geom_line() +
+  geom_point(shape = 1) +
+  geom_hline(aes(yintercept = .5), linetype = "dashed") +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1), labels = function(x) x * 100) +
+  scale_color_manual(values = mcols) +
+  labs(y = "Coverage of 50%-PI (%)") +
+  theme_bw2() +
+  theme(legend.title = element_blank(), axis.title.x = element_blank())
+
+cov50_pl
+```
+
+
+### Sharpness
+
+```{r}
+quantile_sharpness <- function(qvec, alphas = alpha_levels) {
+  q <- as.numeric(qvec); a <- as.numeric(alphas)
+  ok <- !is.na(q); q <- q[ok]; a <- a[ok]
+  if (!length(q)) return(NA_real_)
+  # pick the exact 0.25 and 0.75 (they exist in your grid)
+  q25 <- q[which.min(abs(a - 0.25))]
+  q75 <- q[which.min(abs(a - 0.75))]
+  0.5 * (q75 - q25)     # ~MAD scale
+}
+
+# compute sharpness score
+sharp <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(
+    sh = if (first(model) %in% quantile_models)
+           quantile_sharpness(forecast)
+         else
+           pred_score(forecast, type = "sharpness"),
+    .groups = "drop"
+  ) %>%
+  group_by(n, model) %>%
+  summarize(sh = mean(sh, na.rm = TRUE), .groups = "drop") %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast")))
+
+# plot sharpness
+sharp_pl <- sharp %>%
+  ggplot(aes(x = factor(n), y = sh, color = model, group = model)) +
+  geom_line() +
+  geom_point(shape = 1) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  scale_color_manual(values = mcols) +
+  labs(y = "Dispersion") +
+  theme_bw2() +
+  theme(legend.title = element_blank(), axis.title.x = element_blank())
+
+sharp_pl
+```
+
+
+### Overestimation
+
+```{r}
+cdf_from_quantiles <- function(qvec, y, alphas = alpha_levels) {
+  y  <- y[1]
+  qv <- as.numeric(qvec); a <- as.numeric(alphas)
+  ok <- !is.na(qv); qv <- qv[ok]; a <- a[ok]
+  if (length(qv) == 0L || is.na(y)) return(NA_real_)
+  
+  o <- order(a); a <- a[o]; qv <- cummax(qv[o])
+  m <- length(qv)
+
+  # below first / above last: use midpoint of the adjacent CDF interval
+  if (y < qv[1])      return(a[1] / 2)             # E[Unif(0, a1)]
+  if (y > qv[m])      return((a[m] + 1) / 2)       # E[Unif(am, 1)]
+  iu <- which(qv >= y)[1]
+  il <- max(1, iu - 1)
+  ql <- qv[il]; qu <- qv[iu]; al <- a[il]; au <- a[iu]
+
+  if (qu > ql) {
+    # linear interpolation between adjacent quantiles
+    al + (au - al) * (y - ql) / (qu - ql)
+  } else {
+    # flat segment: midpoint of CDF interval
+    (al + au) / 2
+  }
+}
+
+# compute bias
+bias <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(b = pred_score(forecast, incidence, type = "bias")) %>%
+  ungroup() %>%
+  group_by(n, model) %>%
+  summarize(b = mean(b, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast"))) 
+
+
+# plot bias
+bias_pl <- bias %>%
+  ggplot(aes(x = factor(n), y = b, color = model, group = model)) +
+  geom_line() +
+  geom_point(shape = 1) +
+  geom_hline(aes(yintercept = 0.5), linetype = "dashed") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05)), labels = function(x) x * 100) +
+  scale_color_manual(values = mcols) +
+  labs(y = "Overestimation (%)") +
+  theme_bw2() +
+  theme(legend.title = element_blank(), axis.title.x = element_blank())
+
+bias_pl
+```
+
+### Summary plot
+
+```{r}
+p1_descr <- pCalib_pl + guides(color = guide_legend(nrow = 1, byrow = T)) + labs(title = "a   Calibration")
+p2_descr <- cov50_pl + theme(legend.position = "none") + labs(title = "b   Empirical coverage")
+p3_descr <- cov90_pl + theme(legend.position = "none")
+p4_descr <- sharp_pl + theme(legend.position = "none") + labs(title = "c   Sharpness")
+p5_descr <- bias_pl + theme(legend.position = "none") + labs(title = "d   Bias")
+csb_summary_pl <- grid.arrange(grid.arrange(p1_descr, ncol = 1),
+                               grid.arrange(p2_descr, p3_descr, ncol = 2), 
+                               grid.arrange(p4_descr, p5_descr, ncol = 2),
+                               ncol = 1, widths = 12, heights = c(7,5,5))
+
+ggsave("results/descriptives.pdf", csb_summary_pl, width = 16 / cm(1), height = 16 / cm(1))
+```
+
+
+## Performance
+
+### CRPS
+
+#### Non-quantile models
+
+```{r}
+# compute CRPS
+crps <- inci_nonq %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(crps = pred_score(x = log1p(forecast), y = log1p(incidence[1]), type = "crps")) %>%
+  ungroup() %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast"))) 
+
+crps_pl <- crps %>%
+  ggplot(aes(x = crps, y = model, group = model, fill = model)) +
+  #stat_slab(alpha = 0.3, scale = 0.8, normalize = "panels") +
+  stat_dots(aes(color = model), quantiles = 20) +
+  stat_pointinterval(point_interval = mean_qi, size = 2.5, shape = 21, fill = "white", .width = NA, color = "black") + 
+  stat_pointinterval(point_interval = median_qi, size = 2.5, shape = 23, fill = "white", .width = NA, color = "blue") + 
+  labs(x = "CRPS", title = "a   CRPS scores") +
+  scale_color_manual(values = mcols) +
+  scale_fill_manual(values = mcols) +
+  facet_wrap(~ n) +
+  theme_bw2() +
+  theme(axis.title.y = element_blank(), legend.title = element_blank(), legend.position = "top")
+  
+crps_pl
+
+
+# Summary
+crps_sum <- crps %>%
+  group_by(n, model) %>%
+  summarize(Median = median(crps),
+            Mean = mean(crps)) %>%
+  ungroup() 
+
+crps_sum %>%
+  mutate_if(is.numeric, round, 2) %>%
+  arrange(Median)
+```
+
+
+```{r}
+# -------- CRPS table (short headers) + clean side-by-side export --------
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(gtable)
+library(readr)
+
+outdir <- "results/crps"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+# 1) mean CRPS per model × horizon
+score_col <- if ("crps" %in% names(crps)) "crps" else "CRPS"
+
+crps_table <- crps %>%
+  group_by(n, model) %>%
+  summarize(mean_crps = mean(.data[[score_col]], na.rm = TRUE), .groups = "drop") %>%
+  mutate(horizon = n) %>%
+  dplyr::select(model, horizon, mean_crps) %>%
+  pivot_wider(names_from = horizon, values_from = mean_crps) %>%
+  arrange(model)
+
+# Shorten headers: "1 wk forecast", "2 wk forecast"
+
+# Save raw numbers
+readr::write_csv(crps_table, file.path(outdir, "crps_table.csv"))
+
+# Display (rounded strings for tidy alignment)
+crps_table_disp <- crps_table %>%
+  mutate(across(-model, ~ sprintf("%.2f", .x)))
+
+# 2) Table grob (smaller font + padding) with solid border
+tbl_theme <- gridExtra::ttheme_default(
+  core   = list(fg_params = list(cex = 0.85, col = "black"),  padding = unit(c(5,7), "pt")),
+  colhead= list(fg_params = list(cex = 0.9,  fontface = "bold"), padding = unit(c(6,8), "pt"))
+)
+
+tg <- gridExtra::tableGrob(crps_table_disp, rows = NULL, theme = tbl_theme)
+
+# Outer border
+tg <- gtable::gtable_add_grob(
+  tg,
+  rectGrob(gp = gpar(fill = NA, col = "black", lwd = 1)),
+  t = 1, l = 1, b = nrow(tg), r = ncol(tg)
+)
+
+# 3) Arrange plot (left) + table (right) on a canvas — no overlap possible
+report_grob <- gridExtra::arrangeGrob(
+  crps_pl + theme(plot.margin = margin(5.5, 5.5, 5.5, 5.5)),
+  tg,
+  ncol = 2,
+  widths = unit.c(unit(0.68, "npc"), unit(0.32, "npc"))  # table gets 32% of width
+)
+
+# Optional: preview in RStudio viewer
+# grid.newpage(); grid.draw(report_grob)
+
+# 4) Save
+ggsave(file.path(outdir, "crps_report.pdf"), report_grob, width = 14, height = 6.5)
+ggsave(file.path(outdir, "crps_report.png"), report_grob, width = 14, height = 6.5, dpi = 300)
+```
+
+#### Quantile models
+```{r}
+source("utils/eval.r")
+
+# 2) helper to get one quantile vector per group
+get_qvec <- function(forecast_vec, draw_vec, model) {
+  if (model %in% quantile_models) {
+    # Quantile-only models: forecasts already *are* quantiles.
+    # Use draw order if available to keep the intended order.
+    if (!is.null(draw_vec)) {
+      v <- forecast_vec[order(draw_vec)]
+    } else {
+      v <- forecast_vec
+    }
+    # Ensure we return exactly length(alpha_levels)
+    v <- as.numeric(v)
+    stopifnot(length(v) >= length(alpha_levels))
+    v[seq_along(alpha_levels)]
+  } else {
+    # Sample-based models: convert draws -> quantiles on the common grid
+    as.numeric(stats::quantile(as.numeric(forecast_vec),
+                               probs = alpha_levels, na.rm = TRUE, names = FALSE, type = 7))
+  }
+}
+
+# 3) compute WIS (one value per group), then average by horizon & model
+wis_raw <- inci %>%
+  group_by(state_id, date, n, model) %>%
+  summarize(
+    obs  = first(incidence),
+    qvec = list(get_qvec(forecast_vec = forecast,
+                         draw_vec = if ("draw" %in% names(dplyr::cur_data())) draw else NULL,
+                         model = first(model))),
+    .groups = "drop"
+  ) %>%
+  # call pred_score with quantiles + alphas
+  dplyr::mutate(WIS = map2_dbl(qvec, obs, ~ pred_score(x = .x, y = .y, type = "wis", alphas = alpha_levels))) %>%
+  dplyr::select(-qvec, -obs)
+
+wis <- wis_raw%>%
+  dplyr::group_by(n, model) %>%
+  dplyr::summarize(WIS = mean(WIS, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(n = ordered(paste0(n, "-week ahead forecast")))
+
+wis_pl <- wis %>%
+  ggplot(aes(x = factor(n), y = WIS, color = model, group = model)) +
+  geom_line() +
+  geom_point(shape = 1) +
+  scale_color_manual(values = mcols) +        # keep your palette
+  labs(x = NULL, y = "WIS (lower is better)") +
+  theme_bw2() +
+  theme(legend.title = element_blank())
+
+wis_pl
+ggsave("results/WIS.pdf", wis_pl, width = 16 / cm(1), height = 6 / cm(1))
+```
+
+```{r}
+# 20 empirical quantiles (0.05,...,0.95)
+emp_probs <- seq(0.05, 0.95, by = 0.05)
+
+# wis_raw must have: state_id, date, n, model, WIS  (from earlier step)
+wis_qdots <- wis_raw %>%
+  filter(is.finite(WIS)) %>%
+  group_by(n, model) %>%
+  summarize(
+    q_vals = list(as.numeric(stats::quantile(WIS, probs = emp_probs, na.rm = TRUE))),
+    .groups = "drop"
+  ) %>%
+  mutate(prob = list(emp_probs)) %>%
+  unnest(c(q_vals, prob)) %>%
+  mutate(
+    n_lab = ordered(paste0(n, "-week ahead forecast")),
+    model = factor(model, c("EpiEstim","EpiNow2","SARIMA","DeepAR","GP","Chronos2"))
+  )
+
+wis_summ <- wis_raw %>%
+  group_by(n, model) %>%
+  summarize(
+    mean_wis   = mean(WIS, na.rm = TRUE),
+    median_wis = median(WIS, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    n_lab = ordered(paste0(n, "-week ahead forecast")),
+    model = factor(model, c("EpiEstim","EpiNow2","SARIMA","DeepAR","GP","Chronos2"))
+  )
+
+wis_q_pl <- ggplot(wis_qdots, aes(x = q_vals, y = model, color = model)) +
+  # Slight vertical offset by quantile
+  geom_point(aes(y = as.numeric(model) + (prob - 0.5) * 0.5),
+             size = 2, alpha = 0.9) +
+  
+  # Mean (blue diamond)
+  geom_point(data = wis_summ, aes(x = mean_wis, y = as.numeric(model)),
+             inherit.aes = FALSE, shape = 23, size = 3.2,
+             color = "royalblue", fill = "white", stroke = 1) +
+  
+  # Median (black circle)
+  geom_point(data = wis_summ, aes(x = median_wis, y = as.numeric(model)),
+             inherit.aes = FALSE, shape = 21, size = 2.6,
+             color = "black", fill = "white", stroke = 0.8) +
+  
+  facet_wrap(~ n_lab, ncol = 2) +
+  scale_y_continuous(
+    breaks = 1:length(levels(wis_qdots$model)),
+    labels = levels(wis_qdots$model)
+  ) +
+  scale_color_manual(values = mcols) +
+  labs(x = "WIS (lower is better)", y = NULL, title = "WIS scores (20 empirical quantiles)") +
+  theme_bw2() +
+  theme(
+    legend.title = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+wis_q_pl
+```
+
+### ... by phase
+
+```{r}
+# summarize crps by phase
+crps_by_phase <- crps %>%
+  left_join(phase_labs %>% 
+              dplyr::select(-start_date, -end_date) %>% 
+              rename(state_id = state)) %>%
+  mutate(epidemic_phase = recode(as.character(epidemic_phase), !!! phase_names_abrv2)) %>%
+  mutate(epidemic_phase = factor(epidemic_phase, levels = phase_names_abrv2)) %>%
+  filter(!is.na(epidemic_phase))
+
+crps_by_phase_sum <- crps_by_phase %>%
+  group_by(epidemic_phase, n, model) %>%
+  summarize(Median = median(crps)) %>%
+  ungroup() 
+
+# plot crps by phase
+crps_by_phase_pl <- crps_by_phase_sum %>%
+  ggplot(aes(x = n, y = Median, fill = model)) +
+  facet_wrap(~ epidemic_phase, ncol = 2) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(values = mcols) +
+  labs(y = "Median CRPS") +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw2() +
+  theme(axis.title.x = element_blank(), legend.title = element_blank(),
+        legend.position = "top")
+
+crps_by_phase_pl 
+save_plot(crps_by_phase_pl, "results/crps_by_phase.pdf", w = 16, h = 10)
+```
+
+
+### ... by state 
+
+```{r}
+# summarize crps by state
+crps_by_state_sum <- crps %>%
+  group_by(state_id, n, model) %>%
+  summarize(Median = median(crps)) %>%
+  ungroup() %>%
+  mutate(state = dplyr::recode(tolower(state_id), !!! state_names))
+
+# plot crps by state
+crps_by_state_pl <- crps_by_state_sum %>%
+  ggplot(aes(x = n, y = Median, fill = model)) +
+  facet_wrap(~ state, ncol = 2) +
+  geom_bar(stat="identity", position = position_dodge2()) +
+  scale_fill_manual(values = mcols) +
+  scale_y_continuous(expand = c(0, NA)) +
+  labs(y = "Median CRPS") +
+  theme_bw2() +
+  theme(legend.title = element_blank(), axis.title.x = element_blank(),
+        legend.position = "top")
+
+crps_by_state_pl
+save_plot(crps_by_state_pl, "results/crps_by_state.pdf", w = 16, h = 10)  
+```
+
+### Pairwise comparisons
+
+```{r}
+# compute pairwise comparisons
+pwc <- pairwise_comparison(crps, by = c("n", "model"))
+
+# relative skill
+rel_skill_pl <- pwc %>%
+  group_by(n, model) %>%
+  slice(1) %>%
+  ungroup() %>%
+  ggplot(aes(y = reorder(model, relative_skill), x = relative_skill, fill = model)) +
+  facet_wrap(~ n) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = mcols) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "Relative skill", title = "b   Pairwise model comparison") +
+  theme_bw2() +
+  theme(axis.title.y = element_blank(), legend.title = element_blank(),
+        legend.position = "none",
+        panel.spacing = unit(.5, "lines"),
+        plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"))
+
+rel_skill_pl
+
+# significance
+score_ratio_comp_pl <- pwc %>%
+  filter(model == "GP",
+         compare_against != "GP") %>%
+  mutate(adj_pval = ifelse(adj_pval < 0.01, "p<0.01", paste0("p=", round(adj_pval, 2)))) %>%
+  ggplot(aes(y = reorder(compare_against, mean_scores_ratio), x = mean_scores_ratio, fill = compare_against)) +
+  facet_wrap(~ n) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = adj_pval), size = 8 / cm(1), hjust = -.1) +
+  scale_fill_manual(values = mcols) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.55))) +
+  labs(x = "Mean score ratio", title = "c   GP compared against...") +
+  theme_bw2() +
+  theme(axis.title.y = element_blank(), legend.title = element_blank(),
+        legend.position = "none",
+        panel.spacing = unit(.5, "lines"))
+
+score_ratio_comp_pl
+
+crps_and_pairwise_pl <- arrangeGrob(crps_pl, arrangeGrob(rel_skill_pl, score_ratio_comp_pl, ncol = 2, widths = c(7.5, 8.5)), nrow = 2, heights = c(10, 6))
+ggsave("results/crps_pairwise.pdf", crps_and_pairwise_pl, width = 16 / cm(1), height = 16 / cm(1))
+```
+
+
+### Hotspot prediction
+
+```{r}
+# compute hotspot probabilities
+hotspot <- inci %>%
+  group_by(state_id, draw, n, model) %>%
+  arrange(date) %>%
+  mutate(is_hotspot = ifelse(incidence / dplyr::lag(incidence, 1) - 1 > 0.25, T, F),
+         pred_hotspot = ifelse(forecast / dplyr::lag(forecast, 1) - 1 > 0.25, T, F)) %>%
+  ungroup() %>%
+  group_by(state_id, n, model, date) %>%
+  summarize(incidence = incidence[1], 
+            is_hotspot = is_hotspot[1],
+            p_hotspot = sum(pred_hotspot) / n()) %>%
+  ungroup() %>%
+  mutate(n = ordered(paste0(n, "-week ahead forecast"))) 
+
+hotspot_filt <- hotspot %>%
+  dplyr::filter(incidence >= 70) 
+
+nrow(hotspot_filt) / nrow(hotspot)
+sum(hotspot_filt$is_hotspot, na.rm = T) / nrow(hotspot_filt)
+
+hotspot_rocs <- hotspot_filt %>%
+  mutate(is_hotspot = factor(ifelse(is_hotspot, "Yes", "No"), levels = c("No", "Yes"))) %>%
+  group_by(n, model) %>%
+  summarize(rocs = list(roc(is_hotspot, p_hotspot))) %>%
+  ungroup()
+
+hotspot_rocs_pl <- hotspot_rocs %>%
+  mutate(sens = lapply(rocs, function(r) r$sensitivities),
+         spec = lapply(rocs, function(r) r$specificities)) %>%
+  dplyr::select(-rocs) %>%
+  unnest(cols = c(sens, spec)) %>%
+  mutate(inv_spec = 1 - spec) %>%
+  ggplot(aes(x = inv_spec, y = sens, color = model)) +
+  facet_wrap(~n) +
+  geom_line() +
+  geom_abline(aes(intercept = 0, slope = 1), alpha = .5, linetype = "dashed") +
+  scale_x_continuous(expand = c(0,0), labels = function(x) x * 100) +
+  scale_y_continuous(expand = c(0,0), labels = function(x) x * 100) +
+  scale_color_manual(values = mcols) +
+  labs(x = "1 - Specificity (%)", y = "Sensitivity (%)") +
+  theme_bw2() +
+  theme(legend.position = c(.9, .2), legend.title = element_blank(),
+        panel.spacing = unit(1, "lines"),
+        plot.margin = unit(c(5.5, 7.5, 5.5, 5.5), "points"),
+        legend.key.size = unit(.2, "cm"))
+
+hotspot_rocs_pl
+
+hotspot_aucs <- hotspot_rocs %>%
+  mutate(auc = sapply(rocs, function(r) r$auc)) %>%
+  dplyr::select(-rocs) %>%
+  mutate(auc = round(100 * auc)) %>%
+  dcast(model ~ n) %>%
+  set_names(c("Model", "1-week AUC", "2-week AUC"))
+
+tt <- ttheme_default(colhead=list(fg_params = list(parse=TRUE)),
+                     base_size = 8,
+                     padding = unit(c(2, 4), "mm"))
+auc_tbl <- tableGrob(hotspot_aucs, rows=NULL, theme = tt)
+
+hotspot_roc_auc_pl <- arrangeGrob(hotspot_rocs_pl, auc_tbl, ncol = 2, widths = c(10, 6))
+ggsave("results/hotspot.pdf", hotspot_roc_auc_pl, width = 16 / cm(1), height = 6 / cm(1))
+```
