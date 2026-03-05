@@ -5,7 +5,7 @@ This repository contains the complete codebase and evaluation pipeline for a com
 Performance is assessed using general probabilistic metrics, including CRPS, calibration, and sharpness. Furthermore, the models are evaluated using decision-theoretic measures, such as the Cost-Loss framework and Murphy diagrams, to quantify actionable forecast value for public health planning.
 
 ## Full Research Report
-You can read the comprehensive methodology, experimental design, and findings in the full project report. Please navigate to the [`docs/Yuxin_urops_report.pdf`](./docs/Yuxin urops report.pdf) file to view the detailed analysis.
+You can read the comprehensive methodology, experimental design, and findings in the full project report. Please navigate to the [`docs/Yuxin urops report.pdf`](./docs/Yuxin%20urops%20report.pdf) file to view the detailed analysis.
 
 ## Repository Architecture
 
